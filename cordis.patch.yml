@@ -1,0 +1,5 @@
+# dsh-session-search bundle layer: inserts the plugin row. Row id stays stable so
+# re-adds and profile patches can target it.
+- insert:
+    - id: dsh-session-search
+      name: '@240xu/dsh-session-search'

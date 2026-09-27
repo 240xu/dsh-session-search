@@ -1,0 +1,41 @@
+{
+  "name": "@240xu/dsh-session-search",
+  "version": "0.1.0",
+  "description": "DSH web plugin: cross-session full-text search over all persisted session logs (user/assistant/system messages). Incremental mtime+size index cached at $DSH_HOME/cache/session-search (zero writes to ~/.dsh/sessions), standalone HTML panel page, fenced HTTP API and a tolerant session_search agent tool. Zero npm dependencies.",
+  "type": "module",
+  "license": "MIT",
+  "author": "240xu",
+  "keywords": ["dsh-plugin"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/240xu/dsh-session-search.git"
+  },
+  "files": [
+    "src/",
+    "test/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./indexer": "./src/indexer.js",
+    "./session-file": "./src/session-file.js",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=23.5"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
