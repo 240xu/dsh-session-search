@@ -4,6 +4,11 @@
  * 与 dsh-message-ops 的 session-file.js 同源的多帧 zstd 读取实现
  * （有意复制保持插件自包含、不跨包 import）：DSH 会话日志 = 多个独立
  * zstd 帧串联，帧 0 = 恰一行 session header，其后每帧一批 NDJSON 事件。
+ * 格式代际：v4（session.v4.jsonl.zstd，当前 cohort）与 v3 帧结构完全
+ * 同构，仅文件名/header.version 数字不同，读取端统一兼容（legacy 单帧
+ * 历史上 header.version 为 0，一并放行）；旧格式
+ * session.jsonl.zstd（legacy 单帧整文件）= 解压后首行 header、其余行
+ * 事件，走同一条解析路径（单帧等效于解压整份）。
  * 帧扫描按魔数定位（与宿主/其它 @240xu 插件一致的已知取舍，见 README）。
  * 本插件只读：对 ~/.dsh/sessions 零写入。
  * @module dsh-session-search/session-file
@@ -15,6 +20,43 @@ import os from "node:os";
 import { constants, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 const ZSTD_MAGIC = 0xfd2fb528;
+
+/** 会话代际：v4 与 v3 帧结构同构；legacy 单帧历史上以 version 0 落盘。 */
+const KNOWN_VERSIONS = new Set([0, 3, 4]);
+
+/**
+ * 校验会话 header 代际：v3/v4（以及缺省 version 的 legacy）都接受。
+ * @throws 明确报出未知代际（fail loud，避免静默按错误结构解析）。
+ */
+function assertKnownVersion(header) {
+  const v = header?.version;
+  if (v === undefined || KNOWN_VERSIONS.has(v)) return;
+  throw new Error(`unsupported session log version: ${v} (known: 0/legacy, 3, 4)`);
+}
+
+/** 把一段 NDJSON 文本解析为事件数组（撕裂行跳过）。 */
+function parseEventLines(text) {
+  const events = [];
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try { events.push(JSON.parse(t)); } catch { /* torn record: skip */ }
+  }
+  return events;
+}
+
+/**
+ * legacy 单帧（session.jsonl.zstd）：解压文本 = 首行 header + 其余行事件。
+ * @returns {{header: object, events: object[]}}
+ */
+function parseLegacySingleFrame(text) {
+  const nl = text.indexOf("\n");
+  if (nl === -1) throw new Error("legacy single-frame log has no header line");
+  const header = JSON.parse(text.slice(0, nl).trim());
+  if (header.type !== "session") throw new Error("first line is not a session header");
+  assertKnownVersion(header);
+  return { header, events: parseEventLines(text.slice(nl + 1)) };
+}
 
 const yieldToLoop = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -41,22 +83,19 @@ function scanZstdFrames(buf) {
   return { frames };
 }
 
-/** 同步整读（header + 事件）。小文件 / 测试用。 */
+/** 同步整读（header + 事件）。小文件 / 测试用。v3/v4/legacy 单帧通吃。 */
 export function readSessionFile(file) {
   const buf = fs.readFileSync(file);
   const { frames } = scanZstdFrames(buf);
   if (frames.length === 0) throw new Error("empty or header-less session log");
-  const headerText = zstdDecompressSync(buf.subarray(frames[0].start, frames[0].end)).toString("utf8");
-  const header = JSON.parse(headerText.trim());
+  const frame0Text = zstdDecompressSync(buf.subarray(frames[0].start, frames[0].end)).toString("utf8");
+  if (frames.length === 1) return parseLegacySingleFrame(frame0Text);
+  const header = JSON.parse(frame0Text.trim());
   if (header.type !== "session") throw new Error("first frame is not a session header");
+  assertKnownVersion(header);
   const events = [];
   for (const f of frames.slice(1)) {
-    const text = zstdDecompressSync(buf.subarray(f.start, f.end)).toString("utf8");
-    for (const line of text.split("\n")) {
-      const t = line.trim();
-      if (!t) continue;
-      try { events.push(JSON.parse(t)); } catch { /* torn record: skip */ }
-    }
+    events.push(...parseEventLines(zstdDecompressSync(buf.subarray(f.start, f.end)).toString("utf8")));
   }
   return { header, events };
 }
@@ -70,19 +109,19 @@ export async function readSessionFileAsync(file, { framesPerYield = 8 } = {}) {
   const buf = fs.readFileSync(file);
   const { frames } = scanZstdFrames(buf);
   if (frames.length === 0) throw new Error("empty or header-less session log");
-  const headerText = zstdDecompressSync(buf.subarray(frames[0].start, frames[0].end)).toString("utf8");
-  const header = JSON.parse(headerText.trim());
+  const frame0Text = zstdDecompressSync(buf.subarray(frames[0].start, frames[0].end)).toString("utf8");
+  if (frames.length === 1) {
+    // legacy 单帧：一次解压即整份，无需让出
+    return { ...parseLegacySingleFrame(frame0Text), frameCount: 1 };
+  }
+  const header = JSON.parse(frame0Text.trim());
   if (header.type !== "session") throw new Error("first frame is not a session header");
+  assertKnownVersion(header);
   const events = [];
   const bodyFrames = frames.slice(1);
   let sinceYield = 0;
   for (const f of bodyFrames) {
-    const text = zstdDecompressSync(buf.subarray(f.start, f.end)).toString("utf8");
-    for (const line of text.split("\n")) {
-      const t = line.trim();
-      if (!t) continue;
-      try { events.push(JSON.parse(t)); } catch { /* torn record: skip */ }
-    }
+    events.push(...parseEventLines(zstdDecompressSync(buf.subarray(f.start, f.end)).toString("utf8")));
     if (++sinceYield >= framesPerYield) { sinceYield = 0; await yieldToLoop(); }
   }
   return { header, events, frameCount: bodyFrames.length };
@@ -129,25 +168,38 @@ export function discoverSessionLogs() {
     for (const id of ids) {
       if (!id.isDirectory()) continue;
       if (!SESSION_ID_RE.test(id.name)) continue;
-      const logPath = path.join(root, slug.name, id.name, "session.v3.jsonl.zstd");
-      let st;
-      try { st = fs.statSync(logPath); } catch { continue; }
-      out.push({ slug: slug.name, id: id.name, logPath, mtime: st.mtimeMs, size: st.size });
+      // v4 优先（当前 cohort），回落 v3，再回落 legacy 单帧
+      let logPath, format, st;
+      for (const [name, fmt] of [
+        ["session.v4.jsonl.zstd", "v4-multiframe"],
+        ["session.v3.jsonl.zstd", "v3-multiframe"],
+        ["session.jsonl.zstd", "legacy-single-frame"],
+      ]) {
+        const candidate = path.join(root, slug.name, id.name, name);
+        try { st = fs.statSync(candidate); logPath = candidate; format = fmt; break; } catch { continue; }
+      }
+      if (!logPath) continue;
+      out.push({ slug: slug.name, id: id.name, logPath, format, mtime: st.mtimeMs, size: st.size });
     }
   }
   return out;
 }
 
-/** 测试/复用：写一份最小会话日志（真实 zstd 格式）。 */
-export function writeSessionLog(dir, header, events) {
+/** 测试/复用：写一份最小会话日志（真实 zstd 格式）。format: "v4"|"v3"|"legacy"。 */
+export function writeSessionLog(dir, header, events, format = "v4") {
   fs.mkdirSync(dir, { recursive: true });
   const compress = (s) => zstdCompressSync(Buffer.from(s, "utf8"), { params: { [constants.ZSTD_c_checksumFlag]: 1 } });
-  const buf = Buffer.concat([
-    compress(JSON.stringify(header) + "\n"),
-    compress(events.map((e) => JSON.stringify(e)).join("\n") + "\n"),
-  ]);
-  const logPath = path.join(dir, "session.v3.jsonl.zstd");
+  const name = format === "v4" ? "session.v4.jsonl.zstd"
+    : format === "v3" ? "session.v3.jsonl.zstd"
+    : "session.jsonl.zstd";
+  const buf = format === "legacy"
+    ? compress([JSON.stringify(header), ...events.map((e) => JSON.stringify(e))].join("\n") + "\n")
+    : Buffer.concat([
+        compress(JSON.stringify(header) + "\n"),
+        compress(events.map((e) => JSON.stringify(e)).join("\n") + "\n"),
+      ]);
+  const logPath = path.join(dir, name);
   fs.writeFileSync(logPath, buf);
   const st = fs.statSync(logPath);
-  return { logPath, mtime: st.mtimeMs, size: st.size };
+  return { logPath, format, mtime: st.mtimeMs, size: st.size };
 }
