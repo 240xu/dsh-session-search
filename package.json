@@ -1,6 +1,6 @@
 {
   "name": "@240xu/dsh-session-search",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "DSH web plugin: cross-session full-text search over all persisted session logs (user/assistant/system messages). Incremental mtime+size index cached at $DSH_HOME/cache/session-search (zero writes to ~/.dsh/sessions), standalone HTML panel page, fenced HTTP API and a tolerant session_search agent tool. 跨会话全文搜索：增量索引、独立面板页、HTTP API 与 session_search 代理工具。零 npm 依赖。",
   "type": "module",
   "license": "MIT",
@@ -30,7 +30,7 @@
     "node": ">=23.5"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6 || ^0.2.0-rc.1"
   },
   "dsh": {
     "bundle": {
