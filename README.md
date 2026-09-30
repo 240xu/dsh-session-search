@@ -99,3 +99,10 @@ node --check src/*.js
 ## License
 
 MIT
+
+## v0.1.4
+
+- 命中项新增「在 Timeline 打开」按钮：直达 lazy-view 时间线深链
+  `/lazyview?session=<id>&seq=<seq>`（lazy-view ≥0.3.0）。
+- 主搜索按钮触控目标提升至 ≥44×44px（.acts 辅助钮 36px 下限）。
+- 搜索请求飞行中按钮 disabled（含失败恢复），防重复点击。

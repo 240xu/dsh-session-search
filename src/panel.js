@@ -22,7 +22,9 @@ export function panelHtml() {
   input { flex: 1; background: var(--dsw-alias-input-bg, #0d1117); color: inherit;
           border: 1px solid var(--dsw-alias-border-l1, #3a465a); border-radius: 6px; padding: 6px 10px; font: inherit; }
   button { background: var(--dsw-alias-interactive-bg, #2a3342); color: inherit; cursor: pointer;
-           border: 1px solid var(--dsw-alias-border-l1, #3a465a); border-radius: 6px; padding: 6px 12px; font: inherit; }
+           border: 1px solid var(--dsw-alias-border-l1, #3a465a); border-radius: 6px; padding: 6px 12px; font: inherit;
+           min-height: 44px; min-width: 44px; box-sizing: border-box; }
+  button[disabled] { opacity: 0.5; cursor: wait; }
   button:hover { background: var(--dsw-alias-interactive-bg-hover, #37435a); }
   .hit { background: var(--dsw-alias-bg-elevated, #161b24); border: 1px solid var(--dsw-alias-border-l1, #232a35);
          border-radius: 8px; margin: 8px 0; padding: 8px 12px; }
@@ -30,7 +32,10 @@ export function panelHtml() {
   .hit .meta { color: var(--dsw-alias-label-secondary, #9aa0a6); font-size: 11px; margin-bottom: 4px; word-break: break-all; }
   .hit .snippet { white-space: pre-wrap; word-break: break-word; }
   .hit .acts { margin-top: 6px; display: flex; gap: 6px; }
-  .hit .acts button { font-size: 11px; padding: 2px 8px; }
+  .hit .acts button, .hit .acts a { font-size: 11px; padding: 2px 8px; min-height: 36px; min-width: 36px; }
+  .hit .acts a { background: var(--dsw-alias-interactive-bg, #2a3342); color: inherit; cursor: pointer;
+           border: 1px solid var(--dsw-alias-border-l1, #3a465a); border-radius: 6px; text-decoration: none; display: inline-flex; align-items: center; }
+  .hit .acts a:hover { background: var(--dsw-alias-interactive-bg-hover, #37435a); }
   #status { color: var(--dsw-alias-label-tertiary, #9aa0a6); margin: 8px 0; }
   .err { color: var(--dsw-alias-danger, #f28b82); }
   code { color: var(--dsw-alias-info, #8ab4f8); }
@@ -57,9 +62,13 @@ function copyText(text, btn) {
     .catch(function () { btn.textContent = "复制失败"; });
 }
 function run() {
+  var go = document.getElementById("go");
   var q = document.getElementById("q").value.trim();
   if (!q) { status.textContent = "请输入关键词"; return; }
+  if (go.disabled) return;
+  go.disabled = true;
   status.textContent = "搜索中…";
+  var done = function () { go.disabled = false; };
   fetch("/api/session-search?q=" + encodeURIComponent(q) + "&limit=50")
     .then(function (r) { return r.json(); })
     .then(function (data) {
@@ -74,7 +83,8 @@ function run() {
           + esc(h.session.title || h.session.id) + ' · seq ' + esc(h.seq) + ' · ' + esc(h.type) + '</div>'
           + '<div class="snippet">' + esc(h.snippet) + '</div>'
           + '<div class="acts"><button data-copy="' + i + '">复制定位</button>'
-          + '<span style="font-size:11px;color:var(--dsw-alias-label-secondary,#9aa0a6)"><code>' + esc(loc) + '</code> · 在主界面打开该会话后用 message-ops/消息列表定位到该 seq</span></div>'
+          + '<a href="/lazyview?session=' + encodeURIComponent(h.session.id) + '&seq=' + encodeURIComponent(h.seq) + '" target="_blank" rel="noopener">在 Timeline 打开</a>'
+          + '<span style="font-size:11px;color:var(--dsw-alias-label-secondary,#9aa0a6)"><code>' + esc(loc) + '</code> · 深链直达 lazy-view 时间线对应 seq</span></div>'
           + '</div>';
       }).join("");
       Array.prototype.forEach.call(results.querySelectorAll("button[data-copy]"), function (btn) {
@@ -82,7 +92,8 @@ function run() {
         btn.addEventListener("click", function () { copyText(h.session.id + " seq " + h.seq, btn); });
       });
     })
-    .catch(function (e) { status.textContent = "搜索失败: " + e.message; status.className = "err"; });
+    .catch(function (e) { status.textContent = "搜索失败: " + e.message; status.className = "err"; })
+    .finally(done);
 }
 document.getElementById("go").addEventListener("click", run);
 document.getElementById("q").addEventListener("keydown", function (e) { if (e.key === "Enter") run(); });
