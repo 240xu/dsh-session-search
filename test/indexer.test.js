@@ -231,3 +231,38 @@ test('readSessionFile 往返：真实 zstd 格式可读（自包含实现健全�
   assert.equal(header.type, 'session')
   assert.equal(events.length, 2)
 })
+
+// ── 0.1.5 回归（P1 毒化）：同步抛出不得永久毒化 refresh；坏缓存必须自愈 ────
+// 毒化窗口 = IIFE 首个 await 之前的同步抛出：内层 finally 的 scanning=null 先于
+// 赋值执行，随后 rejected promise 被挂上。构造向量：缓存已热（全部 cache-hit，
+// 循环不 await）+ 有删除（removed>0 → 必 saveCache）+ 缓存目录被同名文件占位
+// （mkdirSync 同步抛 ENOTDIR/EEXIST）→ 精确命中同步窗口。
+test('毒化回归：同步窗口抛出后，下一次 refresh 必须仍可执行', async () => {
+  const s1 = makeSession('proj-poison', '毒化恢复用查询内容')
+  const idx = new SessionIndex()
+  const warm = await idx.refresh()
+  assert.ok(warm.total >= 1, '缓存预热')
+  // 制造 removed>0：删掉一个会话目录
+  fs.rmSync(path.join(process.env.DSH_HOME, 'sessions', s1.slug, s1.id), { recursive: true, force: true })
+  // 缓存目录换成同名文件 → saveCache 的 mkdirSync 同步抛
+  const cr = cacheRoot()
+  fs.rmSync(cr, { recursive: true, force: true })
+  fs.writeFileSync(cr, 'not a directory')
+  let firstRejected = false
+  try { await idx.refresh() } catch { firstRejected = true }
+  assert.equal(firstRejected, true, '同步窗口的 saveCache 抛出必须以 rejection 呈现')
+  // 修复故障：恢复缓存目录
+  fs.unlinkSync(cr)
+  // 关键断言：修复后 refresh 必须成功（原 bug：永久返回同一个 rejected promise）
+  const second = await idx.refresh()
+  assert.ok(second && typeof second.total === 'number', '修复后 refresh 必须恢复，而非继续返回被毒化的 rejected promise')
+})
+
+test('毒化回归：sessions:null 的坏缓存走重建而非 TypeError', async () => {
+  const dir = cacheRoot()
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify({ version: 1, builtAt: 1, sessions: null }))
+  const idx = new SessionIndex()
+  const res = await idx.refresh()
+  assert.ok(res && typeof res.total === 'number', '坏缓存被识别并重建，不抛 TypeError（typeof null === object 陷阱）')
+})

@@ -36,7 +36,9 @@ function messagesOf(events) {
 function loadCache() {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(cacheRoot(), "index.json"), "utf8"));
-    if (raw && raw.version === 1 && typeof raw.sessions === "object") return raw;
+    // 0.1.5（P1）：typeof null === 'object'——原校验接受 {"sessions":null}，
+    // 首条 refresh 读 this.cache.sessions[key] 同步 TypeError → 与上同款毒化
+    if (raw && raw.version === 1 && raw.sessions && typeof raw.sessions === "object" && !Array.isArray(raw.sessions)) return raw;
   } catch { /* absent/corrupt → rebuild */ }
   return { version: 1, builtAt: 0, sessions: {} };
 }
@@ -65,8 +67,15 @@ export class SessionIndex {
    */
   async refresh({ onLog } = {}) {
     if (this.scanning) return this.scanning;
-    this.scanning = (async () => {
-      try {
+    // 0.1.5（P1 修复）：原实现把 async IIFE 直接赋给 this.scanning——IIFE 在首个
+    // await 前同步抛出（saveCache ENOSPC / 坏缓存 sessions:null 读属性）时，
+    // 内层 finally 的 this.scanning=null 先于赋值执行，随后 rejected promise 被
+    // 永久挂上 → 此后所有 refresh 永远返回同一个 rejected promise，索引到进程重启
+    // 前全部 500，且毒化后 saveCache 永不执行、坏缓存无法自愈。
+    // 正确顺序：先赋值，再在外部挂 finally（且吞掉 finally 链自身的 rejection，
+    // 调用方仍通过返回的 p 收到原始 rejection）。
+    const scanPromise = (async () => {
+      {
         const logs = discoverSessionLogs();
         const seen = new Set();
         let scanned = 0, skipped = 0;
@@ -98,13 +107,17 @@ export class SessionIndex {
         for (const key of Object.keys(this.cache.sessions)) {
           if (!seen.has(key)) { delete this.cache.sessions[key]; removed++; }
         }
-        saveCache(this.cache);
+        // 0.1.5（P2）：零变更不重写 index.json——GET /api/session-search 每次都先
+        // await refresh()，大索引下无条件同步 stringify+write 会阻塞事件循环
+        if (scanned > 0 || removed > 0) saveCache(this.cache);
         return { scanned, skipped, removed, total: Object.keys(this.cache.sessions).length };
-      } finally {
-        this.scanning = null;
       }
     })();
-    return this.scanning;
+    this.scanning = scanPromise;
+    scanPromise.finally(() => {
+      if (this.scanning === scanPromise) this.scanning = null;
+    }).catch(() => { /* finally 链自吞——原始 rejection 由 scanPromise 返回给调用方 */ });
+    return scanPromise;
   }
 
   /**

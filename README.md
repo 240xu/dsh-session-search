@@ -106,3 +106,13 @@ MIT
   `/lazyview?session=<id>&seq=<seq>`（lazy-view ≥0.3.0）。
 - 主搜索按钮触控目标提升至 ≥44×44px（.acts 辅助钮 36px 下限）。
 - 搜索请求飞行中按钮 disabled（含失败恢复），防重复点击。
+
+## 0.1.5 · Bug 猎场修复（P1 毒化 + P2）
+
+- **[P1] refresh 被 rejected promise 永久毒化**：async IIFE 首个 await 前同步抛出
+  （如缓存目录被占位 → saveCache mkdirSync 抛）时，内层 finally 的 `scanning=null`
+  先于赋值执行，随后 rejected promise 永久挂上 → 索引/搜索 500 到进程重启，且坏缓存
+  无法自愈。改为先赋值再外挂 finally；`loadCache` 校验收紧（`typeof null==='object'`
+  陷阱：`{"sessions":null}` 现在走重建）。两条回归测试**在原代码上实证全红**。
+- **[P2] 零变更不重写 index.json**：脏标记（scanned/removed>0 才落盘）——原实现每次
+  搜索（GET 先 refresh）都同步 stringify 全缓存 + 写盘。
