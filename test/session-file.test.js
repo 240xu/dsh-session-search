@@ -49,10 +49,17 @@ test("legacy single-frame async read", async () => {
   assert.equal(r.frameCount, 1);
 });
 
-test("unknown version fails loud with clear message", () => {
+test("corrupt version fails loud with clear message", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-v2-"));
+  const { logPath } = writeSessionLog(dir, HEADER(2), [EV(1)], "v4");
+  assert.throws(() => readSessionFile(logPath), /unsupported session log version: 2/);
+});
+
+test("future version (≥5) warns but reads (no silent index break)", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-v9-"));
   const { logPath } = writeSessionLog(dir, HEADER(9), [EV(1)], "v4");
-  assert.throws(() => readSessionFile(logPath), /unsupported session log version: 9/);
+  const { events } = readSessionFile(logPath); // 不抛 = 接受
+  assert.ok(Array.isArray(events) && events.length >= 1);
 });
 
 test("legacy single-frame with historical version 0 reads (real-world legacy)", () => {

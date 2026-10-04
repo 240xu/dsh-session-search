@@ -116,3 +116,10 @@ MIT
   陷阱：`{"sessions":null}` 现在走重建）。两条回归测试**在原代码上实证全红**。
 - **[P2] 零变更不重写 index.json**：脏标记（scanned/removed>0 才落盘）——原实现每次
   搜索（GET 先 refresh）都同步 stringify 全缓存 + 写盘。
+
+## 0.1.6 · 未来代际前视（P2）
+
+- 文件名泛扫 `session.vN.jsonl.zstd`（取 N 最大）——固定 v4/v3 字面量会让 dsh 发布
+  v5 后新会话文件**永远发现不了**（静默断索引）；与 lazy-view artifact.js 同款做法。
+- header 版本 ≥5 正整数：warn + best-effort 索引（原 throw → per-session 静默 skip）；
+  1/2/负数/非整数（损坏头）保持 fail loud。测试改语义 + 新增未来代际接受用例。

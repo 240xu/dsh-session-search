@@ -31,6 +31,14 @@ const KNOWN_VERSIONS = new Set([0, 3, 4]);
 function assertKnownVersion(header) {
   const v = header?.version;
   if (v === undefined || KNOWN_VERSIONS.has(v)) return;
+  // 0.1.6（P2）：分代际处置——正整数 ≥5 = 未来代际，从 throw 降为 warn+接受
+  // （throw 会让该会话 per-session skip 且无 degraded 信号，dsh 发 v5 后全部
+  // 会话静默断索引；帧结构 best-effort + 显式告警优于静默丢弃）；
+  // 1/2/负数/非整数 = 损坏头，保持 fail loud（守住解析安全）。
+  if (Number.isInteger(v) && v >= 5) {
+    console.warn(`[dsh-session-search] session log version ${v} is newer than known (0/3/4) — best-effort indexing; if text looks wrong, update KNOWN_VERSIONS`);
+    return;
+  }
   throw new Error(`unsupported session log version: ${v} (known: 0/legacy, 3, 4)`);
 }
 
@@ -168,15 +176,35 @@ export function discoverSessionLogs() {
     for (const id of ids) {
       if (!id.isDirectory()) continue;
       if (!SESSION_ID_RE.test(id.name)) continue;
-      // v4 优先（当前 cohort），回落 v3，再回落 legacy 单帧
+      // 0.1.6（P2）：代际文件名泛扫——固定 v4/v3 字面量会让 v5+ 的会话文件
+      // 永远发现不了（静默断索引）。先试已知 cohort，再扫 session.vN.jsonl.zstd
+      // 取 N 最大者（与 lazy-view artifact.js 同款做法），legacy 兜底。
       let logPath, format, st;
-      for (const [name, fmt] of [
+      const dirPath = path.join(root, slug.name, id.name);
+      const knownNames = [
         ["session.v4.jsonl.zstd", "v4-multiframe"],
         ["session.v3.jsonl.zstd", "v3-multiframe"],
-        ["session.jsonl.zstd", "legacy-single-frame"],
-      ]) {
-        const candidate = path.join(root, slug.name, id.name, name);
+      ];
+      for (const [name, fmt] of knownNames) {
+        const candidate = path.join(dirPath, name);
         try { st = fs.statSync(candidate); logPath = candidate; format = fmt; break; } catch { continue; }
+      }
+      if (!logPath) {
+        try {
+          let bestN = -1;
+          for (const f of fs.readdirSync(dirPath)) {
+            const m = /^session\.v(\d+)\.jsonl\.zstd$/.exec(f);
+            if (m) {
+              const n = Number.parseInt(m[1], 10);
+              if (Number.isSafeInteger(n) && n > bestN) { bestN = n; logPath = path.join(dirPath, f); }
+            }
+          }
+          if (logPath) format = `v${bestN}-multiframe`;
+        } catch { /* dir gone → legacy fallback below */ }
+      }
+      if (!logPath) {
+        const candidate = path.join(dirPath, "session.jsonl.zstd");
+        try { st = fs.statSync(candidate); logPath = candidate; format = "legacy-single-frame"; } catch { /* none */ }
       }
       if (!logPath) continue;
       out.push({ slug: slug.name, id: id.name, logPath, format, mtime: st.mtimeMs, size: st.size });
