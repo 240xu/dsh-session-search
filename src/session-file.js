@@ -136,6 +136,39 @@ export async function readSessionFileAsync(file, { framesPerYield = 8 } = {}) {
 }
 
 /** 从 message 事件提取首个非空 text 块。 */
+/**
+ * 被「消息回滚」遮蔽的 seq 集合 —— 自包含复制自 dsh-message-ops/session-file.js
+ * 的 `readReplaceOp` + `computeShadowed`（与本文件其余 zstd 读取同源复制的同一约定）。
+ *
+ * 为什么不是 import：本插件刻意零 npm 依赖（package.json `dependencies` 为空），
+ * 见 src/index.js / src/fence.js 文件头「自包含复制」约定。**改这两处必须同步改
+ * dsh-message-ops**，防漂移由 test/session-shadowed.test.js 的 computeShadowed
+ * 等值锁保证（两边跑同一批事件断言集合完全相同）。
+ *
+ * 语义：surface replace 遮蔽 [startSeq..endSeq] —— append-only 日志里原 seq 仍在，
+ * 但**用户已回滚，不应出现在搜索结果里**。恢复是「以新 seq 追加重放副本」，
+ * 新副本不在任何 replace 区间内，因此**恢复后仍能搜到**（且不会与死本重复，
+ * 死本已被过滤）。这条正是专家组评估里「隐藏 vs 删除」的隐私缺口补丁。
+ */
+export function readReplaceOp(e) {
+  const op = e && e.surfaceOp;
+  if (!op || typeof op !== "object" || op.op !== "replace") return null;
+  const startSeq = Number.isSafeInteger(op.startSeq) ? op.startSeq : op.start;
+  const endSeq = Number.isSafeInteger(op.endSeq) ? op.endSeq : op.end;
+  if (!Number.isSafeInteger(startSeq) || !Number.isSafeInteger(endSeq)) return null;
+  return { startSeq, endSeq };
+}
+
+export function computeShadowed(events) {
+  const shadowed = new Set();
+  for (const e of events) {
+    const range = readReplaceOp(e);
+    if (!range) continue;
+    for (let s = range.startSeq; s <= range.endSeq; s++) shadowed.add(s);
+  }
+  return shadowed;
+}
+
 export function messageText(e) {
   const msg = e && e.data && e.data.message;
   const content = msg && Array.isArray(msg.content) ? msg.content : (e && e.data && e.data.content);

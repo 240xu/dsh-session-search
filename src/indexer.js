@@ -16,16 +16,23 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { cacheRoot, discoverSessionLogs, readSessionFileAsync, messageText } from "./session-file.js";
+import { cacheRoot, discoverSessionLogs, readSessionFileAsync, messageText, computeShadowed } from "./session-file.js";
 
 const TEXT_LIMIT = 500;
 
 /** 单会话索引条目（msg 级）。 */
 function messagesOf(events) {
   const out = [];
+  // 0.1.7：**被回滚遮蔽的消息不进索引**（专家组评估的隐私缺口 #3）。
+  // 遮蔽由 append-only 的 surface replace marker 表达；恢复则以新 seq 追加重放副本，
+  // 新副本不在 replace 区间内 → 恢复后照常可搜、且不会与死本重复（死本已滤掉）。
+  // 任一 revert/restore 都会 append 日志 → mtime+size 变化 → 增量重建必然重算本集合，
+  // 不存在「缓存里留着旧遮蔽集」的陈旧窗口（缓存版本见 loadCache 的 version）。
+  const shadowed = computeShadowed(events);
   for (const e of events) {
     if (!e || typeof e.seq !== "number") continue;
     if (e.type !== "user/message" && e.type !== "assistant/message" && e.type !== "system/message") continue;
+    if (shadowed.has(e.seq)) continue;
     const text = messageText(e);
     if (!text) continue;
     out.push({ seq: e.seq, type: e.type, text: text.length > TEXT_LIMIT ? text.slice(0, TEXT_LIMIT) : text });
@@ -38,9 +45,11 @@ function loadCache() {
     const raw = JSON.parse(fs.readFileSync(path.join(cacheRoot(), "index.json"), "utf8"));
     // 0.1.5（P1）：typeof null === 'object'——原校验接受 {"sessions":null}，
     // 首条 refresh 读 this.cache.sessions[key] 同步 TypeError → 与上同款毒化
-    if (raw && raw.version === 1 && raw.sessions && typeof raw.sessions === "object" && !Array.isArray(raw.sessions)) return raw;
+    // 0.1.7：version 1→2 —— 旧缓存是**未过滤遮蔽消息**的索引，直接复用会让
+    // 已回滚内容继续可搜（隐私缺口本身修不掉）。跳过 version 校验即全量重建。
+    if (raw && raw.version === 2 && raw.sessions && typeof raw.sessions === "object" && !Array.isArray(raw.sessions)) return raw;
   } catch { /* absent/corrupt → rebuild */ }
-  return { version: 1, builtAt: 0, sessions: {} };
+  return { version: 2, builtAt: 0, sessions: {} };
 }
 
 /** 原子写：tmp + rename（同目录保证同一文件系统）。 */
