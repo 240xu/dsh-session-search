@@ -193,6 +193,18 @@ export function computeShadowed(events) {
   for (const e of events) {
     const range = readReplaceOp(e);
     if (!range) continue;
+    // M2′（0.1.9）：反向区间 [start>end] —— 引擎 foldSurface 的替换遮蔽是
+    // 「节点索引序重算」（与 dsh-message-ops 同款改动，注释见那边；复演证据
+    // 在 ../..../m2-probe/）。磁盘等价推导源 = 顶层 sourceEventSeqs（折叠凭据）。
+    // 直接吃凭据而不是对端 span 交叉，是因为凭据本来就 ⊆ 全表面 —— 交集免费。
+    if (range.startSeq > range.endSeq) {
+      const src = e.sourceEventSeqs;
+      if (!Array.isArray(src)) continue;
+      for (const s of src) {
+        if (Number.isInteger(s) && s >= 0 && s < e.seq) shadowed.add(s);
+      }
+      continue;
+    }
     // M1 护栏：超 span 上限直接抛（fail loud）。indexer 的 per-session catch
     // 会捕获并跳过该会话（保留旧缓存），不允许把事件循环卡死在无界循环上。
     // 与 dsh-message-ops 的**有意分歧**，见 MAX_SPAN 注释。

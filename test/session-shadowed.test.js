@@ -107,7 +107,7 @@ test('无 marker 的会话不受影响（基线不回归）', async () => {
   assert.equal(hits.length, 2, `普通会话两条都应命中，实际 ${hits.length} 条`)
 })
 
-test('缓存 version 1→2：旧版（未过滤遮蔽）缓存被拒并全量重建', async () => {
+test('缓存 version 门：v1/v2（未过滤遮蔽 / 反向忽略时代）缓存被拒并全量重建', async () => {
   // 构造一个 version:1 的陈旧缓存 —— 它代表「过滤前」的索引状态
   const cacheFile = path.join(
     path.dirname(new URL(import.meta.url).pathname),
@@ -117,12 +117,12 @@ test('缓存 version 1→2：旧版（未过滤遮蔽）缓存被拒并全量重
   const { cacheRoot } = await import('../src/session-file.js')
   fs.mkdirSync(cacheRoot(), { recursive: true })
   fs.writeFileSync(path.join(cacheRoot(), 'index.json'), JSON.stringify({
-    version: 1, builtAt: Date.now(),
+    version: 2, builtAt: Date.now(),
     sessions: { 'ghost/session': { title: '回滚前的陈旧索引', mtimeMs: 1, size: 1, messages: [{ seq: 0, type: 'user/message', text: 'ALPHA-7788 旧缓存里的机密' }] } },
   }))
   const index = new SessionIndex()
-  assert.equal(index.cache.version, 2, 'v1 缓存必须被拒，落到 version 2 空缓存')
-  assert.equal(Object.keys(index.cache.sessions).length, 0, 'v1 条目不得被继承')
+  assert.equal(index.cache.version, 3, 'v1/v2 缓存必须被拒，落到 version 3 空缓存')
+  assert.equal(Object.keys(index.cache.sessions).length, 0, 'v1/v2 条目不得被继承')
 })
 
 test('防漂移锁：本插件 computeShadowed 与 dsh-message-ops 实现逐事件等值', {
@@ -142,11 +142,36 @@ test('防漂移锁：本插件 computeShadowed 与 dsh-message-ops 实现逐事�
     [{ type: 'system/message', seq: 0, surfaceOp: 'append' }],
     [{ type: 'system/message', seq: 0, surfaceOp: { op: 'append', startSeq: 1, endSeq: 9 } }],
     [{ type: 'system/message', seq: 0, surfaceOp: { op: 'replace', startSeq: 'x', endSeq: 9 } }],
-    [{ type: 'system/message', seq: 0, surfaceOp: { op: 'replace', startSeq: 9, endSeq: 4 } }],
-    // 多 marker 叠加
+    // M2′正例：反向区间 [9>4] = 引擎「索引序重算」的真遮蔽（复演实证，非畸形）——
+    // 无 sourceEventSeqs 凭据 → 两实现都按旧约定忽略（等值域内的保守行为），但
+    // 语义注释已翻转：这不再是「非法」，而是「无凭据时无法等价推导 → 忽略」。
+    [{ type: 'system/message', seq: 10, surfaceOp: { op: 'replace', startSeq: 9, endSeq: 4 } }],
+    // M2′正例：反向区间 + 凭据 → 按凭据折叠（引擎等价，语料 afcc0453 形态）
+    [
+      {
+        type: 'user/message', seq: 718,
+        sourceEventSeqs: [530, 531, 465],
+        surfaceOp: { op: 'replace', startSeq: 530, endSeq: 465 },
+        data: { message: { role: 'user', content: [{ type: 'text', text: 'compacted' }] }, source: { kind: 'compact-checkpoint' } },
+      },
+      { type: 'system/message', seq: 10, surfaceOp: { op: 'replace', startSeq: 2, endSeq: 3 } },
+    ],
+    // M2′ 畸形凭据（非整数/越界 → 逐项丢弃，仍不抛）
+    [
+      {
+        type: 'user/message', seq: 20,
+        sourceEventSeqs: ['x', 21, -1, null, 19],
+        surfaceOp: { op: 'replace', startSeq: 30, endSeq: 2 },
+      },
+    ],
+    // 多 marker 叠加（含一条反向带凭据）
     [
       { type: 'system/message', seq: 0, surfaceOp: { op: 'replace', startSeq: 0, endSeq: 2 } },
-      { type: 'system/message', seq: 9, surfaceOp: { op: 'replace', startSeq: 7, endSeq: 11 } },
+      {
+        type: 'user/message', seq: 9,
+        sourceEventSeqs: [7, 8],
+        surfaceOp: { op: 'replace', startSeq: 8, endSeq: 7 },
+      },
       { type: 'user/message', seq: 12, surfaceOp: 'append' },
     ],
     // 混入无 surfaceOp 的普通消息

@@ -47,9 +47,11 @@ function loadCache() {
     // 首条 refresh 读 this.cache.sessions[key] 同步 TypeError → 与上同款毒化
     // 0.1.7：version 1→2 —— 旧缓存是**未过滤遮蔽消息**的索引，直接复用会让
     // 已回滚内容继续可搜（隐私缺口本身修不掉）。跳过 version 校验即全量重建。
-    if (raw && raw.version === 2 && raw.sessions && typeof raw.sessions === "object" && !Array.isArray(raw.sessions)) return raw;
+    // 0.1.9：2→3 —— M2′ 反向区间语义（compact-checkpoint 凭据遮蔽）落地，
+    // v2 缓存的遮蔽集是「反向忽略」时代的旧口径，必须重建。
+    if (raw && raw.version === 3 && raw.sessions && typeof raw.sessions === "object" && !Array.isArray(raw.sessions)) return raw;
   } catch { /* absent/corrupt → rebuild */ }
-  return { version: 2, builtAt: 0, sessions: {} };
+  return { version: 3, builtAt: 0, sessions: {} };
 }
 
 /** 原子写：tmp + rename（同目录保证同一文件系统）。 */
