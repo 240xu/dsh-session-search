@@ -4,28 +4,47 @@
  * 对应 dsh-message-ops 专家组评估的隐私缺口 #3：
  * 「遮蔽 ≠ 搜索不可见；用户以为删了其实还能搜到」。
  *
- * 三条语义 + 一条防漂移锁：
+ * 三条语义 + 防漂移锁：
  *   1. revert 后原 seq 在 surface replace 区间内 → 搜索**搜不到**；
  *   2. restore 以新 seq 追加重放副本（不在任何 replace 区间）→ **仍能搜到**，
  *      且死本已被滤掉 → 不会同一段话出现两条；
  *   3. 缓存 version 1→2：旧缓存存的是未过滤条目，必须被拒并全量重建；
- *   4. 防漂移锁：本插件「自包含复制」的 computeShadowed 必须与
- *      dsh-message-ops 的实现对**同一批事件**产出**完全相同**的集合。
- *      复制方案的真实风险是悄悄走样 → 这条锁就是它的看门狗；
+ *   4. 防漂移锁：本插件「自包含复制」的 computeShadowed / scanZstdFrames
+ *      （session-file.js）与 isTrustedApiRequest（fence.js）必须与
+ *      dsh-message-ops 的同族实现对**同一批输入**产出**完全相同**的结果。
+ *      复制方案的真实风险是悄悄走样 → 这些锁就是它的看门狗；
  *      两条实现一旦分叉，本测试立刻红，而不是让用户去搜到已回滚的内容。
+ *      注：computeShadowed 的 MAX_SPAN 护栏是本插件的有意扩展（M1），
+ *      源实现没有它；锁的等值域是双方共同域（span ≤ MAX_SPAN）。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { zstdCompressSync } from 'node:zlib'
 
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ss-shadow-'))
 
-const { SessionIndex } = await import('../src/indexer.js')
-const { writeSessionLog, computeShadowed } = await import('../src/session-file.js')
+// M4（0.1.7）：基线路径不再硬编码绝对路径 —— 本仓库与 dsh-message-ops 约定
+// 同级并列（../dsh-plugins-src/*）；按相对本仓库定位，但等值断言依旧要求
+// message-ops 源码在场：找不到就 console.warn 一次并 skip 相关用例
+// （skip-loud，不是静默吞 —— 缺基线≠等值，绝不能假装绿）。
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const M = path.join(HERE, '../../dsh-message-ops/src/session-file.js')
+const M_OPS = path.join(HERE, '../../dsh-message-ops/src/ops-core.js')
+const MISSING = [M, M_OPS].filter((p) => !fs.existsSync(p))
+if (MISSING.length > 0) {
+  console.warn(
+    `[dsh-session-search test] 防漂移锁基线缺失（skip-loud）：测试文件旁找不到 ${MISSING.join(', ')}` +
+    ` —— dsh-message-ops 不在本仓库旁，相关等值锁用例将 skip；等值未能验证 ≠ 等值`,
+  )
+}
 
-const M = '/data/data/com.termux/files/home/dsh-plugins-src/dsh-message-ops/src/session-file.js'
+const { SessionIndex } = await import('../src/indexer.js')
+const { writeSessionLog, computeShadowed, scanZstdFrames } = await import('../src/session-file.js')
+const { isTrustedApiRequest } = await import('../src/fence.js')
 
 let n = 0
 function user(seq, text) {
@@ -106,7 +125,9 @@ test('缓存 version 1→2：旧版（未过滤遮蔽）缓存被拒并全量重
   assert.equal(Object.keys(index.cache.sessions).length, 0, 'v1 条目不得被继承')
 })
 
-test('防漂移锁：本插件 computeShadowed 与 dsh-message-ops 实现逐事件等值', async () => {
+test('防漂移锁：本插件 computeShadowed 与 dsh-message-ops 实现逐事件等值', {
+  skip: MISSING.includes(M) ? 'message-ops 基线缺失（见顶部 console.warn），等值未能验证' : false,
+}, async () => {
   const ref = await import(M)
   assert.equal(typeof ref.computeShadowed, 'function', 'message-ops 必须导出 computeShadowed')
 
@@ -143,4 +164,125 @@ test('防漂移锁：本插件 computeShadowed 与 dsh-message-ops 实现逐事�
       `case #${i} 两实现不一致 —— 自包含副本已与 dsh-message-ops 走样，请同步修复（勿直接改断言）\n` +
       `  本插件: ${JSON.stringify(mine)}\n  源实现: ${JSON.stringify(theirs)}`)
   }
+})
+
+test('防漂移锁：本插件 scanZstdFrames 与 dsh-message-ops 帧扫描逐位等值', {
+  skip: MISSING.includes(M) ? 'message-ops 基线缺失（见顶部 console.warn），等值未能验证' : false,
+}, async () => {
+  const ref = await import(M)
+  assert.equal(typeof ref.scanZstdFrames, 'function', 'message-ops 必须导出 scanZstdFrames')
+
+  const magic = () => Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+  const fill = (n) => Buffer.alloc(n, 0x78) // 'x' —— 永不含魔数，方便读期望值
+  // 真实 zstd 帧（带 checksum）：压缩 payload 内可能出现假魔数 —— 两个实现
+  // 看同一份字节流必须切出同样的帧边界（这正是逐位等值的意义）。
+  const realFrame = (n) => zstdCompressSync(Buffer.alloc(n, 0x61))
+
+  const cases = [
+    // 边界：空 / 短于 4 字节（tornStart）
+    Buffer.alloc(0),
+    Buffer.alloc(1),
+    Buffer.alloc(3),
+    Buffer.concat([magic().subarray(0, 3)]),
+    // 单帧 / 多帧完整流
+    Buffer.concat([magic(), fill(8)]),
+    Buffer.concat([magic(), fill(8), magic(), fill(4)]),
+    Buffer.concat([magic(), fill(8), magic(), fill(2), magic(), fill(0)]),
+    // 帧内含假魔数（scanner 不解压，按字节扫 —— 两实现必须同位）
+    Buffer.concat([magic(), Buffer.from([0, 0x28, 0xb5, 0x2f, 0xfd, 1]), fill(4)]),
+    // 撕裂尾：不满 4 字节的残帧
+    Buffer.concat([magic(), fill(8), magic().subarray(0, 3)]),
+    // 尾部恰好一个完整裸魔数（frame of garbage/空 payload —— 两边判定一致）
+    Buffer.concat([magic(), fill(8), magic()]),
+    // 真实 zstd 帧串联 + 残尾
+    Buffer.concat([realFrame(30000), realFrame(7), magic(), magic(), magic().subarray(0, 2)]),
+    Buffer.concat([realFrame(1), realFrame(1), realFrame(1)]),
+    // 坏魔数 → 两个实现抛同样的 message
+    fill(10),
+    Buffer.concat([Buffer.from([1, 2, 3, 4]), magic(), fill(4)]),
+  ]
+
+  for (const [i, buf] of cases.entries()) {
+    let mine, mineErr, theirs, theirsErr
+    try { mine = scanZstdFrames(buf) } catch (e) { mineErr = e }
+    try { theirs = ref.scanZstdFrames(buf) } catch (e) { theirsErr = e }
+    assert.equal(
+      mineErr ? mineErr.message : null,
+      theirsErr ? theirsErr.message : null,
+      `case #${i} 抛错行为不一致 —— 帧扫描副本已与 dsh-message-ops 走样（勿直接改断言）`,
+    )
+    assert.deepEqual(
+      mine ?? null, theirs ?? null,
+      `case #${i} 帧边界不一致 —— 帧扫描副本已与 dsh-message-ops 走样（勿直接改断言）\n` +
+      `  本插件: ${JSON.stringify(mine ?? { err: String(mineErr) })}\n  源实现: ${JSON.stringify(theirs ?? { err: String(theirsErr) })}`,
+    )
+  }
+})
+
+test('防漂移锁：本插件 isTrustedApiRequest 与 dsh-message-ops/ops-core 围栏逐请求等值', {
+  skip: MISSING.includes(M_OPS) ? 'message-ops 基线缺失（见顶部 console.warn），等值未能验证' : false,
+}, async () => {
+  const ref = await import(M_OPS)
+  assert.equal(typeof ref.isTrustedApiRequest, 'function', 'ops-core 必须导出 isTrustedApiRequest')
+
+  const reqs = [
+    undefined,                                  // 无 req
+    { headers: null },
+    { headers: {} },                            // 无 Host
+    { headers: { host: 'evil.com' } },          // 非回环
+    { headers: { host: 'evil.com:3080' } },
+    { headers: { host: '127.0.0.1:3080' } },
+    { headers: { host: '127.0.0.1' } },
+    { headers: { host: 'localhost:3080' } },
+    { headers: { host: '[::1]:3080' } },
+    { headers: { host: '[::1]' } },
+    { headers: { host: '256.300.1.1' } },       // 非法 IPv4
+    { headers: { host: '0.0.0.0' } },
+    { headers: { host: 'sub.127.0.0.1' } },     // 5 段
+    { headers: { host: '127.0.0.1:99999' } },   // 端口超界 → parseAuthority 失败
+    { headers: { host: 127000 } },              // 非字符串 host
+    { headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' } },
+    { headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin' } },
+    { headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' } },
+    { headers: { host: '127.0.0.1:3080', origin: 'http://evil.com' } },
+    { headers: { host: '127.0.0.1:3080', origin: null } },
+    { headers: { host: '127.0.0.1:3080', origin: '::not a url::' } },
+    { headers: { host: 'localhost:3080', origin: ['http://localhost:3080'] } }, // 非字符串 origin
+    { headers: { host: 'evil.com', origin: 'http://evil.com' } },               // Origin 兜不住非回环
+  ]
+
+  for (const [i, req] of reqs.entries()) {
+    const mine = isTrustedApiRequest(req)
+    const theirs = ref.isTrustedApiRequest(req)
+    assert.equal(mine, theirs,
+      `case #${i} 围栏判定不一致 —— fence 副本已与 dsh-message-ops/ops-core 走样（勿直接改断言）\n` +
+      `  本插件: ${mine}\n  源实现: ${theirs}\n  req: ${JSON.stringify(req)}`)
+  }
+})
+
+test('M1 护栏：computeShadowed 超大 span 直接抛错（不允许无界循环）', () => {
+  const hostile = [{
+    type: 'system/message', seq: 1,
+    surfaceOp: { op: 'replace', startSeq: 0, endSeq: 2_000_000 },
+  }]
+  assert.throws(() => computeShadowed(hostile), /span too large/,
+    '超出 MAX_SPAN 的 replace marker 必须 fail loud（护栏与 dsh-message-ops 的有意分歧，勿改护栏）')
+  // 正常区间内（span ≤ MAX_SPAN 的共同域）不抛
+  const plain = [{ type: 'system/message', seq: 9, surfaceOp: { op: 'replace', startSeq: 0, endSeq: 5 } }]
+  assert.deepEqual([...computeShadowed(plain)].sort(), [0, 1, 2, 3, 4, 5])
+})
+
+test('M1 护栏：坏 marker 会话在增量 refresh 中被 per-session skip，其余会话照常索引', async () => {
+  makeSession('p-span-guard', '护栏外围正常会话', [
+    user(0, '正常可搜 token SPAN-GOOD'),
+  ])
+  makeSession('p-span-bad', '含敌对超大 replace marker', [
+    user(0, '坏会话 token SPAN-HOSTILE'),
+    { type: 'system/message', seq: 1, surfaceOp: { op: 'replace', startSeq: 0, endSeq: 5_000_000 } },
+  ])
+  const index = new SessionIndex()
+  const stats = await index.refresh()
+  assert.equal(index.search('SPAN-HOSTILE').length, 0, '坏 marker 会话不得进索引')
+  assert.ok(index.search('SPAN-GOOD').length >= 1, '同批其它会话必须照常索引')
+  assert.ok(stats.total >= 2)
 })

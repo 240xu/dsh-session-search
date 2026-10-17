@@ -1,0 +1,3 @@
+# npm pack 产物：绝不入库（对齐 dsh-message-ops 同款；审计 F2 曾把
+# 0.1.7 的 tgz 误提交 —— 名实不符，会误导 clone 的人）
+*.tgz

@@ -54,7 +54,10 @@ export function panelHtml() {
 var esc = function (s) { return String(s).replace(/[&<>"]/g, function (c) {
   return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
 }); };
-var status = document.getElementById("status");
+// 注意：变量名不可叫 status —— "status" 是 window 的 IDL 属性（字符串），
+// "var status = getElementById(...)" 会把赋值静默转成字符串，后续
+// status.textContent 抛 TypeError，fetch 永不发出、按钮永久变砖。
+var statusEl = document.getElementById("status");
 var results = document.getElementById("results");
 function copyText(text, btn) {
   (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject())
@@ -64,16 +67,16 @@ function copyText(text, btn) {
 function run() {
   var go = document.getElementById("go");
   var q = document.getElementById("q").value.trim();
-  if (!q) { status.textContent = "请输入关键词"; return; }
+  if (!q) { statusEl.textContent = "请输入关键词"; return; }
   if (go.disabled) return;
   go.disabled = true;
-  status.textContent = "搜索中…";
+  statusEl.textContent = "搜索中…";
   var done = function () { go.disabled = false; };
   fetch("/api/session-search?q=" + encodeURIComponent(q) + "&limit=50")
     .then(function (r) { return r.json(); })
     .then(function (data) {
       if (!data || !data.ok) throw new Error(data && data.error || "HTTP error");
-      status.textContent = data.results.length
+      statusEl.textContent = data.results.length
         ? "命中 " + data.results.length + " 条"
         : "无命中";
       results.innerHTML = data.results.map(function (h, i) {
@@ -92,7 +95,7 @@ function run() {
         btn.addEventListener("click", function () { copyText(h.session.id + " seq " + h.seq, btn); });
       });
     })
-    .catch(function (e) { status.textContent = "搜索失败: " + e.message; status.className = "err"; })
+    .catch(function (e) { statusEl.textContent = "搜索失败: " + e.message; statusEl.className = "err"; })
     .finally(done);
 }
 document.getElementById("go").addEventListener("click", run);

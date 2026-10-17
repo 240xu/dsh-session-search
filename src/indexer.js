@@ -132,13 +132,20 @@ export class SessionIndex {
   /**
    * 搜索：大小写不敏感子串（indexOf，防 ReDoS）。按会话 mtime 新→旧排序。
    * @param {string} q 查询串（trim 后为空返回 []）
-   * @param {{limit?:number, project?:string}} opts
-   * @returns {Array<{session:{id,slug,title}, seq, type, snippet}>}
+   * @param {{limit?:number, project?:string, returnMeta?:boolean}} opts
+   *   returnMeta=true 时返回 {hits, capped}：capped 仅当 limit 被钳到 100
+   *   封顶且真实命中 > 封顶（探测多收 1 条判定）——普通 limit 截断不算。
+   *   默认（false）保持原数组返回形态，既有调用方零改动。
+   * @returns {Array<{session:{id,slug,title}, seq, type, snippet}> | {hits, capped}}
    */
-  search(q, { limit = 20, project } = {}) {
+  search(q, { limit = 20, project, returnMeta = false } = {}) {
     const needle = String(q == null ? "" : q).trim().toLowerCase();
-    if (!needle) return [];
-    const lim = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
+    if (!needle) return returnMeta ? { hits: [], capped: false } : [];
+    const requested = Number.isSafeInteger(limit) && limit > 0 ? limit : 20;
+    const lim = Math.min(requested, 100);
+    // 封顶探测：limit 被 100 钳制时多收 1 条 —— 收满 lim+1 条即证明真实
+    // 命中 > 封顶值，capped:true；真实命中恰好 ≤ 封顶值则 capped 不置位。
+    const cap = requested > lim ? lim + 1 : lim;
     const entries = Object.values(this.cache.sessions)
       .filter((s) => (project ? s.slug === project : true))
       .sort((a, b) => b.mtime - a.mtime);
@@ -155,9 +162,12 @@ export class SessionIndex {
           type: m.type,
           snippet: (from > 0 ? "…" : "") + m.text.slice(from, to) + (to < m.text.length ? "…" : ""),
         });
-        if (hits.length >= lim) return hits;
+        if (hits.length >= cap) break;
       }
+      if (hits.length >= cap) break;
     }
-    return hits;
+    const capped = hits.length > lim;
+    const out = capped ? hits.slice(0, lim) : hits;
+    return returnMeta ? { hits: out, capped } : out;
   }
 }

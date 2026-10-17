@@ -92,7 +92,7 @@ dsh plugin add @240xu/dsh-suite   # 会带入本插件
 ## 开发
 
 ```sh
-npm test            # 12 个零依赖测试（node --test，含围栏 403/415 与增量跳过）
+npm test            # 33 个零依赖测试（node --test，含围栏 403/415 与增量跳过）
 node --check src/*.js
 ```
 

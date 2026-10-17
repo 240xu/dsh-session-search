@@ -4,6 +4,7 @@
  *   GET /api/session-search?q=&limit=20&project=<slug 可选>   搜索 API
  *   GET /api/session-search/panel                             独立 HTML 面板页
  *   POST /api/session-search/refresh                          手动触发增量刷新
+ *   GET /api/session-search/health                            健康探测（200 {ok,version}）
  *
  * 硬约束：对 ~/.dsh/sessions 零写入（索引缓存存 $DSH_HOME/cache/session-search/）；
  * 侧边栏零触碰（无任何 sidebar 注册面，UI 即本插件的独立面板页，
@@ -19,6 +20,7 @@
 import { SessionIndex } from "./indexer.js";
 import { isTrustedApiRequest } from "./fence.js";
 import { panelHtml } from "./panel.js";
+import pkg from "../package.json" with { type: "json" };
 
 export const name = "dsh-session-search";
 // tools 是可选增强（cordis inject 是硬依赖声明）：保持 inject 为空，apply 内容错探测。
@@ -53,8 +55,15 @@ function registerHttp(host, targetCtx) {
         const limit = Number(url.searchParams.get("limit")) || undefined;
         const project = url.searchParams.get("project") || undefined;
         await sharedIndex.refresh();
-        const results = sharedIndex.search(q, { limit, project });
-        return sendJson(res, 200, { ok: true, q, count: results.length, results });
+        // capped 探测：limit 触顶 100 封顶且真实命中 > 封顶时返回 capped:true
+        // （仅当被截断才带该字段；普通 limit 截断不算 capped）。
+        const meta = sharedIndex.search(q, { limit, project, returnMeta: true });
+        return sendJson(res, 200, {
+          ok: true, q,
+          count: meta.hits.length,
+          ...(meta.capped ? { capped: true } : {}),
+          results: meta.hits,
+        });
       } catch (err) {
         return sendJson(res, 500, { ok: false, error: String(err && err.message ? err.message : err) });
       }
@@ -94,6 +103,18 @@ function registerHttp(host, targetCtx) {
       res.end(panelHtml());
     },
   }), "dsh-session-search: panel route");
+
+  // --- GET /health（dsh-devkit 生命探测用；走与现有路由一致的围栏/精确匹配） -
+  targetCtx.effect(() => host.register({
+    kind: "exact",
+    path: "/api/session-search/health",
+    handler: async (req, res) => {
+      if (!isTrustedApiRequest(req)) {
+        return sendJson(res, 403, { ok: false, error: "untrusted request origin (loopback Host + same-origin only)" });
+      }
+      return sendJson(res, 200, { ok: true, version: pkg.version });
+    },
+  }), "dsh-session-search: health route");
 }
 
 // ---------------------------------------------------------------------------

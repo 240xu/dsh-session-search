@@ -20,6 +20,27 @@ import os from "node:os";
 import { constants, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 const ZSTD_MAGIC = 0xfd2fb528;
+/** 魔数的字节形态（Buffer.indexOf 用；小端 0xfd2fb528 → 28 b5 2f fd）。 */
+const ZSTD_MAGIC_BYTES = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+
+/**
+ * surface replace 遮蔽区的同步 span 上限（M1 护栏）。
+ * 正常会话的 replace 区间至多几百 seq；超过此值的 marker 只能是损坏日志/
+ * 恶意构造 —— 原实现 `for (s = startSeq; s <= endSeq; s++)` 无上界，
+ * start=0/end=2^53 的假 marker 会把事件循环卡死数小时（OOM 级 DoS）。
+ * 注意：这是**本插件有意扩展的护栏**，dsh-message-ops 的 computeShadowed
+ * 没有它 —— 巨大 span 下两实现行为不同（这里抛错跳过该会话，
+ * 源实现会全量 add），防漂移锁的等值断言只覆盖双方共同域（span ≤ 本上限）。
+ */
+const MAX_SPAN = 1_000_000;
+
+/** OpsError 风格错误（带语义状态码；本插件自包含，不跨包 import）。 */
+class SessionFileError extends Error {
+  constructor(message, status = 400) {
+    super(message);
+    this.status = status;
+  }
+}
 
 /** 会话代际：v4 与 v3 帧结构同构；legacy 单帧历史上以 version 0 落盘。 */
 const KNOWN_VERSIONS = new Set([0, 3, 4]);
@@ -70,9 +91,16 @@ const yieldToLoop = () => new Promise((resolve) => setImmediate(resolve));
 
 /**
  * 扫描串联 zstd 流的完整帧边界（不解压块）。
+ *
+ * 找「下一个魔数」用 Buffer.indexOf（原生 memchr 实现）而不是逐字节
+ * readUInt32LE 循环 —— 10.8MB 日志的逐字节扫描实测 44~73ms 且全程同步
+ * 阻塞事件循环（单次卡顿 146ms 的主要来源）；indexOf 同样从 offset+4
+ * 起找、同样要求 4 字节完整落在缓冲区内，语义与原循环**逐位等价**
+ * （命中区间 [offset+4, buf.length-4]，找不到则 end=buf.length）。
+ * 等值由 test/session-shadowed.test.js 的 scanZstdFrames 防漂移锁保证。
  * @returns {{frames: {start:number,end:number}[], tornStart?: number}}
  */
-function scanZstdFrames(buf) {
+export function scanZstdFrames(buf) {
   const frames = [];
   let offset = 0;
   while (offset < buf.length) {
@@ -82,9 +110,8 @@ function scanZstdFrames(buf) {
       throw new Error(`corrupt zstd session log: invalid frame magic at byte ${offset}`);
     }
     let end = buf.length;
-    for (let p = offset + 4; p <= buf.length - 4; p++) {
-      if (buf.readUInt32LE(p) === ZSTD_MAGIC) { end = p; break; }
-    }
+    const found = buf.indexOf(ZSTD_MAGIC_BYTES, offset + 4);
+    if (found !== -1) end = found;
     frames.push({ start, end });
     offset = end;
   }
@@ -114,7 +141,9 @@ export function readSessionFile(file) {
  * @returns {{header, events, frameCount}}
  */
 export async function readSessionFileAsync(file, { framesPerYield = 8 } = {}) {
-  const buf = fs.readFileSync(file);
+  // 与 dsh-message-ops 同款：文件读取走 fs.promises.readFile（线程池，
+  // 不阻塞事件循环 —— 10.8MB 的 readFileSync 是 19ms 的额外同步阻塞）。
+  const buf = await fs.promises.readFile(file);
   const { frames } = scanZstdFrames(buf);
   if (frames.length === 0) throw new Error("empty or header-less session log");
   const frame0Text = zstdDecompressSync(buf.subarray(frames[0].start, frames[0].end)).toString("utf8");
@@ -164,6 +193,14 @@ export function computeShadowed(events) {
   for (const e of events) {
     const range = readReplaceOp(e);
     if (!range) continue;
+    // M1 护栏：超 span 上限直接抛（fail loud）。indexer 的 per-session catch
+    // 会捕获并跳过该会话（保留旧缓存），不允许把事件循环卡死在无界循环上。
+    // 与 dsh-message-ops 的**有意分歧**，见 MAX_SPAN 注释。
+    if (range.endSeq - range.startSeq > MAX_SPAN) {
+      throw new SessionFileError(
+        `surface replace span too large: [${range.startSeq}..${range.endSeq}] exceeds MAX_SPAN=${MAX_SPAN} — refusing to materialize (corrupt or hostile replace marker?)`,
+      );
+    }
     for (let s = range.startSeq; s <= range.endSeq; s++) shadowed.add(s);
   }
   return shadowed;

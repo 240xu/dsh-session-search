@@ -129,6 +129,54 @@ test('搜索：snippet 为 ±60 窗口带省略号（长文本）', async () => 
   assert.ok(hit.snippet.length < 200)
 })
 
+test('capped 封顶标记：真实命中 > 100 封顶时 capped:true；普通 limit 截断不标', async () => {
+  // 单会话 120 条同词消息 → 真实命中 120 > 封顶 100
+  const capId = 'session-99999999-9999-9999-9999-999999999999'
+  const many = Array.from({ length: 120 }, (_, i) => ({
+    type: 'user/message', seq: i, surfaceOp: 'append',
+    data: { message: { role: 'user', content: [{ type: 'text', text: `capsur#${i} captoken` }] } },
+  }))
+  writeSessionLog(
+    path.join(process.env.DSH_HOME, 'sessions', 'proj-cap', capId),
+    { type: 'session', version: 3, id: capId, createdAt: 1, title: 'cap' },
+    many,
+  )
+  const index = new SessionIndex()
+  await index.refresh()
+
+  // 默认 limit=20：数组形态不变；未触顶 → capped false
+  const plain = index.search('captoken')
+  assert.equal(plain.length, 20)
+  // returnMeta 形态：探测封顶
+  const probed = index.search('captoken', { limit: 1e9, returnMeta: true })
+  assert.equal(probed.hits.length, 100, '封顶后应只返回 100 条')
+  assert.equal(probed.capped, true, '真实命中 120 > 封顶 100 → capped')
+  // 小 limit 截断 ≠ capped（用户主动 limit=1，命中 120 不算封顶）
+  assert.equal(index.search('captoken', { limit: 1, returnMeta: true }).capped, false)
+  // 无命中 capped 恒 false
+  assert.deepEqual(index.search('no-such-token-zzz', { returnMeta: true }), { hits: [], capped: false })
+
+  // HTTP 路由：触顶时 JSON 带 capped:true；不触顶不带该键
+  const routes = makeCtx()
+  const res1 = mockRes()
+  await routes.get('/api/session-search')(mockReq({
+    url: '/api/session-search?q=captoken&limit=500',
+    headers: { host: 'localhost:3080', origin: 'http://localhost:3080' },
+  }), res1)
+  assert.equal(res1.status, 200)
+  const body1 = JSON.parse(res1.body)
+  assert.equal(body1.count, 100)
+  assert.equal(body1.capped, true)
+  const res2 = mockRes()
+  await routes.get('/api/session-search')(mockReq({
+    url: '/api/session-search?q=captoken&limit=5',
+    headers: { host: 'localhost:3080', origin: 'http://localhost:3080' },
+  }), res2)
+  const body2 = JSON.parse(res2.body)
+  assert.equal(body2.count, 5)
+  assert.equal('capped' in body2, false, '普通 limit 截断不得带 capped 字段')
+})
+
 // --- 信任围栏（上线硬门槛） ----------------------------------------------------
 
 test('围栏纯函数：非回环 Host 拒绝；cross-site 拒绝；同源 Origin 放行', () => {
@@ -164,7 +212,7 @@ function mockRes() {
 test('路由级：搜索/面板/refresh 非回环 Host 全部 403（围栏先于一切业务）', async () => {
   const routes = makeCtx()
   const evil = { host: 'evil.com:3080' }
-  for (const [route, method] of [['/api/session-search?q=x', 'GET'], ['/api/session-search/panel', 'GET'], ['/api/session-search/refresh', 'POST']]) {
+  for (const [route, method] of [['/api/session-search?q=x', 'GET'], ['/api/session-search/panel', 'GET'], ['/api/session-search/refresh', 'POST'], ['/api/session-search/health', 'GET']]) {
     const res = mockRes()
     await routes.get(route.split('?')[0])(mockReq({ method, url: route, headers: evil }), res)
     assert.equal(res.status, 403, route)
@@ -203,6 +251,19 @@ test('面板页：200 + text/html，无 X-Frame-Options 强设，插值全部 es
   assert.match(res.body, /<div id="results">/)
   // 面板自身不含任何未转义服务端插值（页面是静态字符串，动态插值全走 DOM textContent/esc）
   assert.ok(!res.body.includes('__INDEX__'))
+})
+
+test('health 路由：回环同源 200 {ok,version}，精确匹配形态与既有路由一致', async () => {
+  const routes = makeCtx()
+  assert.ok(routes.has('/api/session-search/health'), 'health 路由必须注册（dsh-devkit 探测面）')
+  const res = mockRes()
+  await routes.get('/api/session-search/health')(mockReq({
+    url: '/api/session-search/health', headers: { host: 'localhost:3080' },
+  }), res)
+  assert.equal(res.status, 200)
+  const body = JSON.parse(res.body)
+  assert.equal(body.ok, true)
+  assert.match(body.version, /^\d+\.\d+\.\d+/)
 })
 
 // --- 工具容错注册 ----------------------------------------------------------------
