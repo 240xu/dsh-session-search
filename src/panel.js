@@ -62,7 +62,7 @@ var results = document.getElementById("results");
 function copyText(text, btn) {
   (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject())
     .then(function () { btn.textContent = "已复制"; setTimeout(function () { btn.textContent = "复制定位"; }, 1200); })
-    .catch(function () { btn.textContent = "复制失败"; });
+    .catch(function () { btn.textContent = "复制失败"; setTimeout(function () { btn.textContent = "复制定位"; }, 1200); });
 }
 function run() {
   var go = document.getElementById("go");
@@ -71,6 +71,7 @@ function run() {
   if (go.disabled) return;
   go.disabled = true;
   statusEl.textContent = "搜索中…";
+  statusEl.className = ""; // 回收上一次失败的 .err，否则成功结果也红字
   var done = function () { go.disabled = false; };
   fetch("/api/session-search?q=" + encodeURIComponent(q) + "&limit=50")
     .then(function (r) { return r.json(); })
