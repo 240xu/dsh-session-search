@@ -9,10 +9,22 @@ zstd，v3 格式）建立消息级全文索引，一条关键词查回所有历�
 - **对 `~/.dsh/sessions` 零写入**：索引缓存是唯一写点，存
   `$DSH_HOME/cache/session-search/index.json`（原子写 tmp+rename）；
 - **侧边栏零触碰**：无任何 sidebar 注册面，UI 是独立面板页
-  `/api/session-search/panel`（devkit 装了可由 Ctrl+K 命令指向该 URL）；
+  `/api/session-search/panel`（可选：装了 dsh-devkit 后可由 Ctrl+K 指向该 URL）；
 - **信任围栏硬门槛**：全部路由先过 `isTrustedApiRequest`（回环 Host 挡
   DNS rebinding + `sec-fetch-site: cross-site` 拒绝 + Origin 同源校验），
   与 dsh-message-ops 0.2.1 同款（arch-review L4/L5 教训）。
+
+
+## 10 秒速查
+
+```sh
+dsh plugin --profile web add @240xu/dsh-session-search
+# 重启后访问 http://<dsh-web-地址>/api/session-search/panel
+```
+
+- 纯只读：只写 `$DSH_HOME/cache/session-search/index.json`，不写会话目录
+- 不想逐个装：`dsh plugin --profile web add @240xu/dsh-plugin-hub`
+- 卸载：`dsh plugin --profile web remove @240xu/dsh-session-search`
 
 ## 端点
 
@@ -32,15 +44,15 @@ zstd，v3 格式）建立消息级全文索引，一条关键词查回所有历�
 ## 安装
 
 ```sh
-# 方式一：独立安装（推荐先这样试）
-dsh plugin --profile web add @240xu/dsh-session-search
+# 方式一：独立安装
+claude mcp add ... # 不适用；DSH 插件安装：
+dsh plugin add @240xu/dsh-session-search
 
-# 方式二：随聚合包安装（会带入本插件及另外三个插件 + 官方 Inspector）
-dsh plugin --profile web add @240xu/dsh-plugin-hub
+# 方式二：随 suite 聚合安装（@240xu/dsh-suite 依赖聚合，推荐）
+dsh plugin add @240xu/dsh-suite   # 会带入本插件
 ```
 
-装完重启 `dsh web`。独立安装与聚合包安装可以共存，浏览器 UI 只显示一份；
-宿主侧可能出现一行 `already registered` 警告，工具只保留一份，属已知噪音。
+独立安装与 suite 安装互斥即可（同 id 的 bundle 行不重复插入）。
 
 ## 索引与性能取舍
 
@@ -81,7 +93,7 @@ dsh plugin --profile web add @240xu/dsh-plugin-hub
 ## 已知重复（待 suite 聚合层收口）
 
 与生态其它插件存在有意复制（保持插件自包含、不跨包 import），待
-`@240xu/dsh-plugin-hub` 聚合层提供共享工具后收口（agg-researcher L3 建议）：
+`@240xu/dsh-suite` 聚合层提供共享工具后收口（agg-researcher L3 建议）：
 
 - `src/fence.js` 的 `isTrustedApiRequest` ≡ dsh-message-ops `ops-core.js` 同款
   （arch-review 要求的上线硬门槛，复制是安全侧的选择）；
