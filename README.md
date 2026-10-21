@@ -32,15 +32,15 @@ zstd，v3 格式）建立消息级全文索引，一条关键词查回所有历�
 ## 安装
 
 ```sh
-# 方式一：独立安装
-claude mcp add ... # 不适用；DSH 插件安装：
-dsh plugin add @240xu/dsh-session-search
+# 方式一：独立安装（推荐先这样试）
+dsh plugin --profile web add @240xu/dsh-session-search
 
-# 方式二：随 suite 聚合安装（@240xu/dsh-suite 依赖聚合，推荐）
-dsh plugin add @240xu/dsh-suite   # 会带入本插件
+# 方式二：随聚合包安装（会带入本插件及另外三个插件 + 官方 Inspector）
+dsh plugin --profile web add @240xu/dsh-plugin-hub
 ```
 
-独立安装与 suite 安装互斥即可（同 id 的 bundle 行不重复插入）。
+装完重启 `dsh web`。独立安装与聚合包安装可以共存，浏览器 UI 只显示一份；
+宿主侧可能出现一行 `already registered` 警告，工具只保留一份，属已知噪音。
 
 ## 索引与性能取舍
 
@@ -81,7 +81,7 @@ dsh plugin add @240xu/dsh-suite   # 会带入本插件
 ## 已知重复（待 suite 聚合层收口）
 
 与生态其它插件存在有意复制（保持插件自包含、不跨包 import），待
-`@240xu/dsh-suite` 聚合层提供共享工具后收口（agg-researcher L3 建议）：
+`@240xu/dsh-plugin-hub` 聚合层提供共享工具后收口（agg-researcher L3 建议）：
 
 - `src/fence.js` 的 `isTrustedApiRequest` ≡ dsh-message-ops `ops-core.js` 同款
   （arch-review 要求的上线硬门槛，复制是安全侧的选择）；
